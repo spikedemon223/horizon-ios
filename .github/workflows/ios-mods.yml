@@ -1,0 +1,156 @@
+name: ios-mods
+# The iPhone and iPad game with native (client) mods baked in. A native mod is a horizon-mixins bundle that
+# rewrites the game's Rust source before it is compiled (docs/native-mods.md), so it cannot be loaded on a phone:
+# there is no compiler there, and iOS refuses code generated or downloaded at runtime. This workflow does what the
+# desktop launcher does on the player's computer, on a Mac runner: apply the bundles, build the patched game for
+# aarch64-apple-ios, and upload an unsigned .ipa to sideload. Content mods (.hmod) need none of this.
+on:
+  workflow_dispatch:
+    inputs:
+      mods:
+        description: >-
+          Native mods, one per line: a GitHub repo `owner/repo` or `owner/repo@ref`. Each repo's root, or the
+          folders in it, that hold a horizon-mixin.toml are used.
+        type: string
+        required: false
+        default: ""
+      bundled:
+        description: >-
+          Also build in the .hnmod files committed in packaging/ios/native-mods/ (shulker_peek, freecam_plus,
+          horizonmatica).
+        type: boolean
+        default: true
+      repin:
+        description: >-
+          Re-pin every mod's horizon_revision to this commit, as the desktop launcher does for a mod built on another
+          Nightly. A mod that needs its exact commit may then fail to compile; the log says where.
+        type: boolean
+        default: true
+      trust_native_code:
+        description: >-
+          I read the source of every mod above. Native mods are native code with full access to the game and
+          the phone app's data, not sandboxed (the launcher's --trust-native-code).
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: ios-mods-${{ github.run_id }}
+  cancel-in-progress: false
+env:
+  HORIZON_TELEMETRY_URL: "off"
+  IOS_TARGET: aarch64-apple-ios
+  HORIZON_MSA_CLIENT_ID: "331e08f8-172d-43b9-835a-3108c2fcdbf3"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_INCREMENTAL: "0"
+  IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+  # The horizon-mixins commit the launcher uses (launcher/src/native_mods.rs, MIXINS_REV).
+  MIXINS_REV: 5a64af938ec86b00d53d16a408aabc0038fb3e57
+
+jobs:
+  ipa:
+    runs-on: ${{ vars.MAC_RUNNER || 'macos-26' }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require the trust acknowledgement
+        if: ${{ !inputs.trust_native_code }}
+        run: |
+          echo "::error::Native mods run with full access. Read their source, then re-run with trust_native_code ticked."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the Apple toolchain
+        run: bash tools/ci/ios-toolchain.sh
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.IOS_TARGET }}
+      - name: Build horizon-mixins
+        run: cargo install --locked --git https://github.com/horizon-rust/horizon-mixins --rev "$MIXINS_REV" --root "$RUNNER_TEMP/mixins" horizon-mixins-cli
+      - name: Unpack the bundled mods
+        if: ${{ inputs.bundled }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mods" "$RUNNER_TEMP/unpack"
+          for f in packaging/ios/native-mods/*.hnmod; do
+            id="$(basename "$f" .hnmod)"
+            unzip -q -o "$f" -d "$RUNNER_TEMP/unpack/$id"
+            # An .hnmod is horizon-native.json plus mixins/<id>/, which holds the horizon-mixin.toml.
+            for dir in "$RUNNER_TEMP/unpack/$id"/mixins/*/; do
+              test -f "$dir/horizon-mixin.toml" || { echo "::error::$f has no mixins/<id>/horizon-mixin.toml"; exit 1; }
+              cp -a "${dir%/}" "$RUNNER_TEMP/mods/b-$(basename "$dir")"
+              echo "bundled: $f"
+            done
+          done
+      - name: Fetch the mods
+        env:
+          MODS: ${{ inputs.mods }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mods" "$RUNNER_TEMP/clone"
+          n=0
+          while IFS= read -r line; do
+            line="$(echo "$line" | xargs)"
+            [ -z "$line" ] && continue
+            repo="${line%%@*}"; ref=""; [ "$repo" != "$line" ] && ref="${line#*@}"
+            [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::Not a GitHub repo: $line"; exit 1; }
+            n=$((n+1)); dest="$RUNNER_TEMP/clone/$n"
+            git clone --quiet ${ref:+--branch "$ref"} "https://github.com/$repo" "$dest"
+            echo "$repo @ $(git -C "$dest" rev-parse HEAD)"
+            found=0
+            while IFS= read -r manifest; do
+              dir="$(dirname "$manifest")"; found=1
+              cp -a "$dir" "$RUNNER_TEMP/mods/$n-$(basename "$dir")"
+            done < <(find "$dest" -name horizon-mixin.toml -not -path '*/.git/*')
+            [ "$found" = 1 ] || { echo "::error::$repo holds no horizon-mixin.toml"; exit 1; }
+          done <<< "$MODS"
+      - name: Apply the mods to the game's source
+        run: |
+          set -euo pipefail
+          ls "$RUNNER_TEMP/mods" | grep -q . || { echo "::error::No mods: tick bundled or list some"; exit 1; }
+          if [ "${{ inputs.repin }}" = "true" ]; then
+            for t in "$RUNNER_TEMP"/mods/*/horizon-mixin.toml; do
+              sed -E -i.bak "s/^(horizon_revision[[:space:]]*=[[:space:]]*\")[0-9a-f]{40}(\")/\1$GITHUB_SHA\2/" "$t"
+              grep -q "$GITHUB_SHA" "$t" || { echo "::error::could not re-pin $t"; exit 1; }
+              rm -f "$t.bak"
+            done
+          fi
+          "$RUNNER_TEMP/mixins/bin/horizon-mixins" apply --workspace . --mods "$RUNNER_TEMP/mods" --out "$RUNNER_TEMP/patched"
+          # The rest of the job builds from the patched workspace; fail here, not in Cargo, if it is not one.
+          test -f "$RUNNER_TEMP/patched/Cargo.toml" || { echo "::error::horizon-mixins did not write a workspace to --out"; exit 1; }
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          workspaces: ${{ runner.temp }}/patched
+          shared-key: ios-mods-${{ env.IOS_TARGET }}
+      - name: Build the patched game
+        working-directory: ${{ runner.temp }}/patched
+        run: cargo build --release --target "$IOS_TARGET" -p horizon-official --no-default-features --features audio,horizon-extras
+      - name: Bundle it
+        working-directory: ${{ runner.temp }}/patched
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          ( cd packaging/ios && xcodegen generate )
+          HORIZON_GAME_PREBUILT=1 xcodebuild -project packaging/ios/HorizonIOS.xcodeproj \
+            -target HorizonGame -configuration Release -sdk iphoneos -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            CONFIGURATION_BUILD_DIR="$PWD/build-ios" \
+            build > xcode-game-build.log 2>&1 || { tail -60 xcode-game-build.log; exit 1; }
+          python3 tools/ci/ios_release.py --stamp-app build-ios/HorizonGame.app \
+            --run-number "$GITHUB_RUN_NUMBER" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --expect-commit "$GITHUB_SHA" --client-id "$HORIZON_MSA_CLIENT_ID"
+          rm -rf game-xcode && mkdir -p game-xcode/Payload
+          cp -a build-ios/HorizonGame.app game-xcode/Payload/
+          ( cd game-xcode && zip -qry "$GITHUB_WORKSPACE/Horizon-game-mods-unsigned.ipa" Payload )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-ios-game-mods
+          path: Horizon-game-mods-unsigned.ipa
+          retention-days: 7
+          if-no-files-found: error

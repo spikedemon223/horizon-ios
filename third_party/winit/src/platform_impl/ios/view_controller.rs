@@ -88,6 +88,11 @@ impl WinitViewController {
         }
     }
 
+    /// Asks UIKit to evaluate `prefersPointerLocked` again (a request it has not granted).
+    pub(crate) fn refresh_pointer_lock(&self) {
+        let _: () = unsafe { msg_send![self, setNeedsUpdateOfPrefersPointerLocked] };
+    }
+
     pub(crate) fn set_prefers_status_bar_hidden(&self, val: bool) {
         self.ivars().prefers_status_bar_hidden.set(val);
         self.setNeedsStatusBarAppearanceUpdate();

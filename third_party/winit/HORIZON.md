@@ -9,7 +9,7 @@ Upstream revision: `e9809ef54b18499bb4f2cac945719ecc2a61061b`.
 The upstream Apache-2.0 license and copyright notices are retained in LICENSE.
 
 The patch is confined to Cargo.toml (UIKit binding features), src/lib.rs (host mapping tests),
-and src/platform_impl/ios/{mod,view,view_controller,window,event_loop,scene,hardware_keyboard,hardware_mouse}.rs.
+and src/platform_impl/ios/{mod,view,view_controller,window,event_loop,scene,hardware_keyboard,hardware_mouse,hidden_pointer,pointer_lock_watch}.rs.
 `src/event.rs` also provides the iOS-only virtual-key constructor described below. All other files are the unmodified published crate. Root Cargo.toml patches crates.io so local
 and CI builds use the same input backend; Cargo.lock removes only winit's registry source/checksum.
 
@@ -23,6 +23,16 @@ a nil scene pointerLockState reports unsupported. GameController GCMouse handler
 relative movement, captured buttons, and scroll. New mice are attached during redraw requests;
 disconnection releases buttons. Handler queues remain Apple's documented main-thread default.
 Captured indirect pointer touches are suppressed so one click does not also hit touch controls.
+`prefersPointerLocked` is only a preference, so each frame the window compares it with the scene's
+`pointerLockState.isLocked`: a wanted lock that is missing is re-requested every 250 ms, up to
+8 times, then a warning is logged once (`pointer_lock_watch.rs`, host-tested). `set_cursor_visible(false)`
+installs a `UIPointerInteraction` whose delegate returns `UIPointerStyle.hiddenPointerStyle`
+(`hidden_pointer.rs`), hiding the system pointer while UIKit has not locked it; `true` removes it.
+
+iPhone has no UIKit pointer lock (`pointerLockState` is nil). With a GameController mouse attached,
+`set_cursor_grab(Locked)` then succeeds as a *virtual* lock: raw deltas, buttons and scroll are
+forwarded as when locked and indirect-pointer touches are suppressed, but the system pointer stays
+visible. With no mouse attached it still reports NotSupported so touch input is unchanged.
 
 The app requires iOS 16; pointer lock/GCMouse require iPadOS 14 and UIKey requires iOS 13.4.
 UIKit ultimately decides whether to honor lock requests. Touch/controller input remains the

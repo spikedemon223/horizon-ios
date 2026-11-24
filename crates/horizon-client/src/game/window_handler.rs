@@ -456,6 +456,19 @@ impl ApplicationHandler for Game<'_> {
         ) {
             self.touch_mouse_used(event_loop);
         }
+        // iPhone has no pointer lock to wait for: a mouse that starts moving mid-game (plugged in
+        // after the view was captured, or after a touch fallback) takes the view over.
+        #[cfg(target_os = "ios")]
+        if matches!(&event, DeviceEvent::MouseMotion { .. })
+            && !self.captured
+            && self.focused
+            && self.keyboard_mouse
+            && self.screen == Screen::Playing
+            && !self.screen_over_playing()
+            && self.player.is_some()
+        {
+            self.capture(true);
+        }
         // A composited view renders offscreen but its keyboard/mouse owner still
         // controls a visible native window. A headless offscreen run never does.
         if self.pending_save.is_none()

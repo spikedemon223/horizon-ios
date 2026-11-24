@@ -41,6 +41,13 @@ fn send(window_id: WindowId, event: WindowEvent) {
     );
 }
 
+/// Whether a hardware mouse is attached right now (iPadOS/iOS 14+).
+pub(super) fn any_connected() -> bool {
+    // SAFETY: documented class property; main-thread use only.
+    let mice: Retained<NSArray<AnyObject>> = unsafe { objc2::msg_send_id![class!(GCMouse), mice] };
+    !mice.is_empty()
+}
+
 impl Mouse {
     pub(super) fn captured(&self) -> bool { self.captured.get() }
     pub(super) fn capture(&self, captured: bool) {

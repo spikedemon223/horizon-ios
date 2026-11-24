@@ -257,3 +257,14 @@ Files upload to a draft release before it becomes public. A release-only retry c
 resume a partial draft, but cannot overwrite a published build or reuse a tag pointing
 at another commit. Downloaded IPAs still need the user's own signing method before
 installation. Prereleases are not marked as the stable `latest` release.
+
+## Native (client) mods
+
+Content mods (`.hmod`) work as on desktop. Native mods (`.hnmod`, horizon-mixins bundles) rewrite the game's Rust
+source and are compiled in, so a phone cannot load them: there is no compiler on it, and iOS refuses code made or
+downloaded at runtime. `.github/workflows/ios-mods.yml` builds them in instead. In your fork's Actions tab, run
+**ios-mods** with the mods as `owner/repo[@ref]` lines and tick `trust_native_code` (native mods are not sandboxed);
+it applies them with horizon-mixins, builds the patched game for `aarch64-apple-ios` and uploads
+`Horizon-game-mods-unsigned.ipa` to sideload. Changing the mod list means a new run. A mod pins the Horizon commit it
+was made for (`horizon_revision` in its `horizon-mixin.toml`); one pinned to another commit is refused by
+horizon-mixins, so build from a fork commit the mod supports. Not yet run on a Mac runner.

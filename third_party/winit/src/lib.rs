@@ -220,3 +220,8 @@ pub mod platform;
 #[cfg(all(test, not(target_os = "ios")))]
 #[path = "platform_impl/ios/hardware_keyboard.rs"]
 mod ios_hardware_keyboard_tests;
+
+// Horizon: the pointer-lock retry logic is plain data, so it is tested on the host too.
+#[cfg(all(test, not(target_os = "ios")))]
+#[path = "platform_impl/ios/pointer_lock_watch.rs"]
+mod ios_pointer_lock_watch_tests;

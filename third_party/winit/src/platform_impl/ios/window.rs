@@ -1,6 +1,8 @@
 #![allow(clippy::unnecessary_cast)]
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
@@ -15,6 +17,8 @@ use objc2_ui_kit::{
 use tracing::{debug, warn};
 
 use super::app_state::EventWrapper;
+use super::hidden_pointer::HiddenPointer;
+use super::pointer_lock_watch::{LockWatch, Verdict};
 use super::view::WinitView;
 use super::view_controller::WinitViewController;
 use crate::cursor::Cursor;
@@ -115,6 +119,8 @@ pub struct Inner {
     view_controller: Retained<WinitViewController>,
     view: Retained<WinitView>,
     gl_or_metal_backed: bool,
+    lock_watch: RefCell<LockWatch>,
+    hidden_pointer: RefCell<Option<HiddenPointer>>,
 }
 
 impl Inner {
@@ -141,6 +147,7 @@ impl Inner {
 
     pub fn request_redraw(&self) {
         self.view.update_mice();
+        self.verify_pointer_lock();
         if self.gl_or_metal_backed {
             let mtm = MainThreadMarker::new().unwrap();
             // `setNeedsDisplay` does nothing on UIViews which are directly backed by CAEAGLLayer or
@@ -285,16 +292,59 @@ impl Inner {
                 msg_send_id![&*scene, pointerLockState]
             });
             if state.is_none() {
-                return Err(ExternalError::NotSupported(NotSupportedError::new()));
+                // iPhone has no UIKit pointer lock. GameController still delivers a mouse's raw
+                // deltas and buttons, so with one attached the lock is virtual: captured input is
+                // forwarded as if locked (the system pointer stays drawn).
+                if !super::hardware_mouse::any_connected() {
+                    return Err(ExternalError::NotSupported(NotSupportedError::new()));
+                }
+                self.view.set_mouse_captured(true);
+                self.lock_watch.borrow_mut().request(false, Instant::now());
+                return Ok(());
             }
         }
         self.view_controller.set_pointer_locked(locked);
         self.view.set_mouse_captured(locked);
+        self.lock_watch.borrow_mut().request(locked, Instant::now());
         Ok(())
     }
 
-    pub fn set_cursor_visible(&self, _visible: bool) {
-        debug!("`Window::set_cursor_visible` is ignored on iOS")
+    /// Whether UIKit really holds the pointer lock: `None` when the device has no pointer lock.
+    fn pointer_lock_held(&self) -> Option<bool> {
+        let scene: Option<Retained<AnyObject>> = unsafe { msg_send_id![&*self.window, windowScene] };
+        let state: Option<Retained<AnyObject>> =
+            scene.and_then(|scene| unsafe { msg_send_id![&*scene, pointerLockState] });
+        state.map(|state| {
+            let locked: objc2::runtime::Bool = unsafe { msg_send![&*state, isLocked] };
+            locked.as_bool()
+        })
+    }
+
+    /// `prefersPointerLocked` is a request UIKit may grant late or never. Called once per frame:
+    /// re-ask while a wanted lock is missing, and say so once when UIKit keeps refusing.
+    fn verify_pointer_lock(&self) {
+        let verdict = self.lock_watch.borrow_mut().poll(self.pointer_lock_held(), Instant::now());
+        match verdict {
+            Verdict::Idle => {}
+            Verdict::Retry => {
+                self.view_controller.refresh_pointer_lock();
+            }
+            Verdict::Refused => warn!(
+                "UIKit did not grant the pointer lock; suspend the app (swipe up) and return to retry"
+            ),
+        }
+    }
+
+    /// Hides the system pointer over the view while it is not locked (iPadOS 13.4+).
+    pub fn set_cursor_visible(&self, visible: bool) {
+        let mtm = MainThreadMarker::new().unwrap();
+        let mut slot = self.hidden_pointer.borrow_mut();
+        match (visible, slot.take()) {
+            (false, None) => *slot = Some(HiddenPointer::install(&self.view, mtm)),
+            (false, Some(existing)) => *slot = Some(existing),
+            (true, Some(existing)) => existing.remove(&self.view),
+            (true, None) => {}
+        }
     }
 
     pub fn drag_window(&self) -> Result<(), ExternalError> {
@@ -591,6 +641,8 @@ impl Window {
             view_controller,
             view,
             gl_or_metal_backed,
+            lock_watch: RefCell::default(),
+            hidden_pointer: RefCell::new(None),
         };
         Ok(Window {
             inner: MainThreadBound::new(inner, mtm),

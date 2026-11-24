@@ -12,7 +12,14 @@ command-suggestion navigation cannot append those identifiers.
 On iPad, `UIViewController.prefersPointerLocked` requests capture and GameController `GCMouse`
 handlers provide relative movement, buttons, and scrolling. Captured indirect-pointer touches are
 suppressed to prevent duplicate clicks. Pause, inventory, chat, resource-pack confirmation,
-launcher presentation, and focus loss release capture. UIKit may decline a capture request.
+launcher presentation, and focus loss release capture. UIKit may decline a capture request: the
+window re-requests a missing lock four times a second (up to 8 times) before logging a warning, and
+hides the system pointer over the game while the cursor is hidden but the lock is not held.
+
+On iPhone, which has no pointer lock, an attached mouse captures virtually: it turns the view and
+clicks in play while the system pointer stays visible. Enable the mouse in Settings > Accessibility
+> Touch > AssistiveTouch > Devices > Pointer Devices. A mouse that starts moving during play takes the
+view over from touch.
 
 Touch overlays follow the last input device used. Connecting hardware alone does not hide them;
 touch input or disconnection of the last-used device restores them. Controllers remain supported.
